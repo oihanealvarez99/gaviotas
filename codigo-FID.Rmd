@@ -1,0 +1,308 @@
+---
+title: "Analisis del efecto de la actividad humana sobre las gaviotas"
+author: "Oihane Alvarez, Daniel Hernandez, Esther Tercero"
+date: "2022-11-22"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+## carga de las librerias
+library(geoR)
+library(spatial)
+library(scatterplot3d)
+library(R2WinBUGS)
+library(ggplot2)
+library(lme4)
+library(mgcv)
+library(grid)
+library(gridExtra)
+library(ggcorrplot)
+library(knitr)
+library(readr)
+library(fitdistrplus)
+library(Metrics)
+library(INLA)
+```
+
+## Datos
+
+```{r}
+## carga del banco de datos
+datos <- read_table("./data/FID.dat")
+datos$colony <- as.factor(datos$colony) # se pasa la variable colony a factor
+```
+
+## Análisis descriptivo de los datos
+
+Antes de pasar a la parte de modelización es necesario realizar un análisis previo descriptivo del banco de datos. Comenzamos con un sencillo resumen numérico de las variables de interés **meanFID**, **Visitors** y **density**.
+
+```{r}
+## resumen numérico de las variables
+summary(datos[,-1])
+```
+
+A través de este simple análisis podemos ver que la mayoría de las colonias de gaviotas patiamarilla no reciven visitantes (mediana igual a 2) y que la distribución de estos es muy asimétrica. Asimismo ocurre algo similar con la densidad y la media de la FID, donde también se observa cierto grado de asimetría en la distribución de los datos. Con tal de apreciar mejor la distribución de los datos vamos a emplear diagramas de caja y bigote.
+
+```{r}
+## boxplot de las variables
+par(mfrow = c(3,1), oma = rep(0,4), mar = rep(2,4))
+for(i in 1:(dim(datos)[2]-1)){
+  boxplot(datos[, 1+i], main = names(datos[1+i]), horizontal = T,
+          col = "aquamarine", outcol = "darkorchid1", outpch = 8)
+}
+```
+
+A través de estos diagramas de cajas podemos ver que la distribución de las variables es asimétrica con largas colas por la derecha, especialmente en el caso de la variable **visitors** donde esta asimetría es más exacerbada.
+
+A continuación, vamos a observar con más detalle la distribución de los datos de la variable respuesta **meanFID** a través de un histograma y su densidad.
+
+```{r}
+## histograma y densidad de la variable meanFID
+histograma <- ggplot(data = datos, aes(meanFID)) +
+  geom_histogram(color = "dodgerblue", fill = "skyblue", binwidth = 10) +
+  scale_x_continuous(breaks=c(0,20,40,60,80)) +
+  theme_bw()
+
+densidad <- ggplot(data = datos, aes(meanFID)) +
+  geom_density(color = "dodgerblue", fill = "skyblue") + theme_bw()
+
+grid.arrange(histograma, densidad)
+```
+
+```{r}
+fit1 <- fitdist(datos$meanFID, dgamma, method = "mle")
+round(fit1$aic,2)
+fit2 <- fitdist(datos$meanFID, dnorm, method = "mle")
+round(fit2$aic,2)
+```
+
+Atendiendo a las carácterísticas de esta variable y haciendo uso de la función **fitdist** la cual ayuda a determinar la distribución que sigue la variable respuesta, parecería apropiado proponer un modelo estadístico gamma, pues la variable es continua y no negativa, y es con la distribución que menor AIC se obtiene. Sin embargo, aunque se obtenga un AIC ligeramente mayor, la forma que describe su densidad e histograma dista de satisfacer la forma de una normal, por lo que consideramos apropiado buscar alguna transformación que pueda corregir la forma de la variable respuesta con tal de obtener un mejor modelo inferencial. Para esta parte solo se va a emplear la densidad de los datos para evaluar la idoneidad de la transformación.
+
+```{r}
+d.log <- ggplot(data = datos, aes(log(meanFID))) +
+  geom_density(color = "dodgerblue", fill = "skyblue") + ggtitle("Transformación logarítmica") + theme_bw()
+
+d.sqrt <- ggplot(data = datos, aes(sqrt(meanFID))) +
+  geom_density(color = "dodgerblue", fill = "skyblue") + ggtitle("Transformación radical cuadrático") + theme_bw()
+
+d.cuad <- ggplot(data = datos, aes(meanFID^2)) +
+  geom_density(color = "dodgerblue", fill = "skyblue") + ggtitle("Transformación cuadrática") + theme_bw()
+
+d.inv <- ggplot(data = datos, aes(1/meanFID)) +
+  geom_density(color = "dodgerblue", fill = "skyblue") + ggtitle("Transformación inversa") + theme_bw()
+
+grid.arrange(d.log,d.sqrt, d.cuad, d.inv)
+```
+
+La tranformación logarítmica no parece solucionar el problema de la forma de los datos, por lo que queda descartada como posible transformación, en cambio, la transformación radical cuadrático parece adoptar la forma de una distribución normal, salvando las distancias, e incluso la de una gamma. En cuanto a las distribuciones cuadrática e inversa adoptan una forma casi idéntica que recuerda a una distribución gamma. Se debe tener en cuenta que al contar únicamente con 18 observaciones en total en el banco de datos, es dificil observar que la variable respuesta tenga una forma satisfactoria debido al pequeño tamaño muestral. Este pequeño análisis parece apuntar a que será necesario tranformar la variable respuesta para obtener un mejor ajuste a la hora de obtener un modelo.
+
+Finalmente vamos a ver cómo es la relación lineal entre las variables explicativas y la variable respuesta transformada. Para ello vamos a emplear una matriz de coeficientes de correlación lineal. Con tal de ver si se requiere transformar también las variables explicativas, la matriz va a contener algunas transformaciones de éstas. Se presentarán los coeficientes relevantes de forma agrupada en una tabla.
+
+```{r}
+## matriz para v. respuesta radical
+v.radical <- data.frame(raizFID = sqrt(datos$meanFID),
+                visitors = datos$visitors,
+                log.visitors = log(datos$visitors),
+                sqrt.visitors = sqrt(datos$visitors),
+                inv.visitors = 1/datos$visitors,
+                quad.visitors = datos$visitors^2,
+                density = datos$density,
+                log.density = log(datos$density),
+                sqrt.density = sqrt(datos$density),
+                inv.density = 1/datos$density,
+                quad.density = datos$density^2)
+mat.radical <- cor(v.radical)
+
+## matriz para v. respuesta cuadratica
+v.quad <- data.frame(quadFID = (datos$meanFID)^2,
+                visitors = datos$visitors,
+                log.visitors = log(datos$visitors),
+                sqrt.visitors = sqrt(datos$visitors),
+                inv.visitors = 1/datos$visitors,
+                quad.visitors = datos$visitors^2,
+                density = datos$density,
+                log.density = log(datos$density),
+                sqrt.density = sqrt(datos$density),
+                inv.density = 1/datos$density,
+                quad.density = datos$density^2)
+mat.quad <- cor(v.quad)
+
+## matriz para v. respuesta inversa
+v.inv <- data.frame(invFID = 1/(datos$meanFID),
+                visitors = datos$visitors,
+                log.visitors = log(datos$visitors),
+                sqrt.visitors = sqrt(datos$visitors),
+                inv.visitors = 1/datos$visitors,
+                quad.visitors = datos$visitors^2,
+                density = datos$density,
+                log.density = log(datos$density),
+                sqrt.density = sqrt(datos$density),
+                inv.density = 1/datos$density,
+                quad.density = datos$density^2)
+mat.inv <- cor(v.inv)
+
+lin <- cbind(mat.radical[1,-1], mat.quad[1,-1], mat.inv[1,-1])
+colnames(lin) <- c("sqrt(FID)", "FID^2", "1/FID")
+kable(round(lin,2), caption = "Coef. de correlación lineal")
+```
+
+En la Tabla 1, se observa para cada transformación de la variable respuesta los coeficientes de correlación lineal de cada variable explicativa y sus transformaciones. De este modo, se puede escoger qué transformación de las dos variables explicativas muestra un coeficiente de linealidad mayor con la variable respuesta y emplearla en la parte de modelización. Cabe destacar que las parejas de variables explicativas que muestran una mayor relación lineal con la variable respuesta es la de la transformación raíz cuadrada.
+
+```{r}
+## Modelos propuesto por Martínez-Abraín et al. (2008)
+modelo_normal <- lm(sqrt(meanFID) ~ log(visitors) + sqrt(density), data = datos)
+AIC(modelo_normal)
+
+## Modelo con mejor correlación lineal 1
+modelo_normal1 <- lm(sqrt(meanFID) ~ sqrt(visitors) + density^2, data = datos)
+AIC(modelo_normal1)
+
+## Modelo con mejor correlación lineal 2
+modelo_normal2 <- lm(sqrt(meanFID) ~ sqrt(visitors) + density, data = datos)
+AIC(modelo_normal2)
+```
+
+Sin embargo, vemos que para la transformación raíz cuadrada de la variable respuesta, las transformaciones de las covariables que hacen que el modelo tenga un mejor ajuste, por obtener un menor AIC, son las tranformaciones sugeridas por Martínez-Abraín et al. (2008), donde se transforma logarítmicamente la variable explicativa de **visitors** y se aplica la transformación raíz cuadrada a la variable explicativa **density**. Es por ello que se decide comparar este modelo, el propuesto por Martínez-Abraín et al. (2008), con un modelo gamma (con el mejor link, por su valor de AIC más bajo) ya que es la distribución que mejor se ha visto que se ajusta a la variable respuesta.
+
+## Ajuste y selección de modelos
+
+### Regresión Gamma por máxima verosimilitud
+
+Se determina cual es el mejor link para el modelo con una distribución Gamma, el cual será el modelo con el link que menor AIC obtenga, siendo este el link inverso.
+
+```{r}
+## Modelo Gamma con link inverso
+modelo_gamma <- glm(meanFID ~ visitors + density, data=datos, family=Gamma(link="inverse"))
+modelo_gamma$aic
+
+## Modelo Gamma con link logaritmo
+modelo_gamma2 <- glm(meanFID ~ visitors + density, data=datos, family=Gamma(link="log"))
+modelo_gamma2$aic
+
+## Modelo Gamma con link identidad
+modelo_gamma3 <- glm(meanFID ~ visitors + density, data=datos, family=Gamma(link="identity"))
+modelo_gamma3$aic
+```
+
+### Inferencia Bayesiana: INLA
+
+Se lleva a cabo la repetición del modelizado pero esta vez empleando INLA. Se emplea INLA ya que nos facilita el modelizado del modelo Gamma por la sencillez de la programación y por la rápidez de la convergencia ya que emplea la aproximación de Laplace.
+
+```{r}
+## Modelo Normal
+attach(datos)
+formula_normal <- sqrt(meanFID) ~ 1 + sqrt(density) + log(visitors)
+modelo_normal_inla <- inla(formula_normal, 
+               family       = 'gaussian',
+               data         = datos,
+               control.inla = list(strategy = 'simplified.laplace'), 
+               control.compute = list(dic=TRUE, waic=TRUE, cpo=TRUE)) 
+summary(modelo_normal_inla)
+```
+
+```{r}
+## Modelo Gamma
+formula_gamma <- meanFID ~ 1 + density + visitors
+modelo_gamma_inla <- inla(formula_gamma, 
+               family          = 'gamma', 
+               data            = datos,
+               control.inla = list(strategy = 'simplified.laplace'),
+               control.compute = list(dic=TRUE, waic=TRUE, cpo=TRUE))
+summary(modelo_gamma_inla)
+```
+
+### Diagnístico del modelo
+
+A continuación, se comprueban las condiciones de aplicabilidad tanto en el modelo Normal con transformaciones de Martínez-Abraín et al. (2008), como en el modelo Gamma con link inverso. Para el primer modelo, se comprueba la normalidad con el contraste de Kolmogorov-Smirnov y la homocedasticidad con el test de Levene. En ambos casos se obtiene un p-valor > 0.05 lo cual indica que cumple ambos tests y que por lo tanto, es un modelo adecuado. Por otro lado, para el modelo Gamma se comprueba si los residuos Pearson están entre -2 y 2 y si tienen un comportamiento normal y vemos mediante las representaciones gráficas que se cumple, por lo que también parece ser un modelo adecuado. 
+
+```{r}
+# Modelo con distribución Normal y transformaciones
+# Contraste de Kolmogorov-Smirnov
+ks.test(x = rstudent(modelo_normal), y = "pt", df = 40)
+# Homocedasticidad
+grupos <- cut(modelo_normal$fitted.values, quantile(modelo_normal$fitted.values, (0:4)/4),
+include.lowest = TRUE)
+lawstat::levene.test(rstandard(modelo_normal), grupos)
+```
+
+```{r}
+# Modelo con distribución Gamma
+# Contraste de Kolmogorov-Smirnov
+ks.test(x = rstudent(modelo_gamma), y = "pt", df = 40)
+# Homocedasticidad
+grupos <- cut(modelo_gamma$fitted.values, quantile(modelo_gamma$fitted.values, (0:4)/4),
+include.lowest = TRUE)
+lawstat::levene.test(rstandard(modelo_gamma), grupos)
+```
+
+```{r}
+par(mfrow = c(2,2))
+plot(modelo_normal)
+plot(modelo_gamma)
+```
+
+Dibujamos los valores observados de la variable respuesta versus los valores ajustados por ambos modelos y vemos que ninguno de los dos modelos consigue ajustar los valores de forma adecuada. Además, no se observa una diagonal clara por lo que esto querrá decir que posiblemente sea necesario el suavizado de alguna de las variables que mejore este ajuste.
+
+```{r}
+par(mfrow = c(1,2))
+plot(datos$meanFID,(modelo_normal$fitted.values)^2, xlim = c(10,80), ylim = c(10,80),
+     main = "Normal",
+     xlab = "Valores observados",
+     ylab = "Valores ajustados")
+abline(0,1)
+plot(datos$meanFID,modelo_gamma$fitted.values, xlim = c(10,80), ylim = c(10,80),
+     main = "Gamma",
+     xlab = "Valores observados",
+     ylab = "Valores ajustados")
+abline(0,1)
+```
+
+### Calidad de ajuste
+
+Con el objetivo de determinar cual de los dos modelos tiene un mejor ajuste, se calcula el valor de MSE que comete cada modelo.
+
+```{r}
+## MSE
+mse(datos$meanFID,(modelo_normal$fitted.values)^2)
+mse(datos$meanFID,modelo_gamma$fitted.values)
+```
+
+Por lo tanto, observamos que el modelo Gamma predice ligeramente mejor que el modelo con el que se compara, modelo Normal, ya que el valor de MSE para el modelo Gamma es de 130 mientras que para el modelo de Martínez-Abraín et al. (2008) es de 133, por lo que determinamos que el modelo de nuestro estudio es más adecuado.
+
+### Calidad de predicción
+
+Para determinar cual de los dos modelos predice mejor, se determina la calidad de predicción de cada uno de los modelos haciendo uso de la validación cruzada, concretamente el LOOCV.
+
+```{r}
+sqrt_meanFID <- sqrt(datos$meanFID)
+sqrt_density <- sqrt(datos$density)
+log_visitors <- log(datos$visitors)
+datos_transformados <- cbind(datos,sqrt_meanFID,sqrt_density,log_visitors)
+datos_transformados <- data.frame(datos_transformados)
+
+modelo_Normal <- glm(meanFID ~ (log_visitors + sqrt_density)^2, data = datos_transformados,family=gaussian)
+cv.glm(datos_transformados,modelo_Normal)$delta
+cv.glm(datos,modelo_gamma)$delta
+```
+
+Nuevamente, se observa que el modelo Gamma propuesto en el estudio supera al modelo Normal ya que como se observa se obtiene un valor de MSE de 187 con dicho modelo, frente a un valor de MSE de 206 con el modelo Normal. Por lo tanto, se observa que el modelo Gamma predice mejor que el modelo Normal.
+
+### GAM: Regresión gamma como suavizado de las variables
+
+Como se comenta previamente, se lleva a cabo la suavización de las variables y se determina si suavizando alguna de las variables explicativas el modelo mejor y se ajusta mejor. 
+
+```{r}
+gam_normal <- gam(sqrt(meanFID) ~ s(log(visitors),k=8) + s(sqrt(density)), data=datos, family=gaussian)
+summary(gam_normal)
+AIC(gam_normal)
+
+gam_gamma <- gam(meanFID ~ s(visitors, k=8) + s(density), data=datos, family=Gamma(link="inverse"))
+summary(gam_gamma)
+AIC(gam_gamma)
+```
+
+Vemos que se consigue un valor de AIC idéntico para el modelo gaussiano con las covariables suavizadas o sin suavizar por lo que suavizar no supone una mejora para este modelo. Además, para el modelo Gamma, la suavización de la variables supone una disminución del AIC en 5 unidades. Sin embargo, no es una disminución tan significativa como para perfer la cuantificación de las covariables. Por lo tanto, se decide no suavizar para poder cuatificar el efecto de ambas covariables sobre la variable respuesta. 
+
